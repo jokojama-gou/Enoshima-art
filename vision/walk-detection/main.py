@@ -48,50 +48,28 @@ class PoseAnalyzer:
                 old_data = list(foot['history'])
                 foot['history'] = collections.deque(old_data, maxlen=self.params.time_smoothing)
         
-    def _calculate_normalized_height(self, landmarks, hip_idx, ankle_idx):
-        """
-        各個体の LEFT_HIP / RIGHT_HIP と ANKLE の相対距離を用いて、
-        カメラとの距離に依存しない「足の上がり幅」を算出する。
-        """
-        hip = landmarks.landmark[hip_idx]
-        ankle = landmarks.landmark[ankle_idx]
-        
-        # 1. 座標の取得
-        dx = ankle.x - hip.x
-        dy = ankle.y - hip.y  # MediaPipeでは下方向が+なので、ankle.y > hip.y が通常（立位時）
-        dz = ankle.z - hip.z  # z座標（深度推定）は判定の補助重みとして使用
-        
-        # 2. 基準距離（疑似的な脚の長さ）の計算
-        # x, y, z すべてを含んだ3D相対距離を用いることで、カメラ距離に依存しないベース値を算出する
-        leg_length = np.sqrt(dx**2 + dy**2 + dz**2)
-        
-        if leg_length < 1e-5:
-            return 0.0
-            
-        # 3. y軸の相対変化による主判定（上がり幅の正規化）
-        # 足がまっすぐ下にあるとき dy は最大(≒leg_length)になり、値は 0 に近づく。
-        # 足が前に出たり上に上がったりすると、dy は小さくなり、値は大きくなる(>0)。
-        lift_ratio = 1.0 - (dy / leg_length)
-        
-        return max(0.0, lift_ratio)
-
     def process_frame(self, results) -> tuple[Optional[float], Dict[str, float]]:
-        metrics = {'left_lift': 0.0, 'right_lift': 0.0}
+        metrics = {'left_lift': 0.0, 'right_lift': 0.0, 'step_length': 0.0}
         
-        if not results.pose_landmarks:
+        # 3Dワールド座標（実寸メートル）を使用することで遠近法の影響を排除
+        if not results.pose_world_landmarks:
             return None, metrics
             
-        # 正規化された足の上がり幅を算出
-        raw_left = self._calculate_normalized_height(
-            results.pose_landmarks, 
-            mp_pose.PoseLandmark.LEFT_HIP.value, 
-            mp_pose.PoseLandmark.LEFT_ANKLE.value
-        )
-        raw_right = self._calculate_normalized_height(
-            results.pose_landmarks, 
-            mp_pose.PoseLandmark.RIGHT_HIP.value, 
-            mp_pose.PoseLandmark.RIGHT_ANKLE.value
-        )
+        landmarks = results.pose_world_landmarks.landmark
+        left_ankle = landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value]
+        right_ankle = landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value]
+        
+        # y軸は下方向が正。両足のうち最も下に位置する方（yが大きい方）を「地面」とする
+        ground_y = max(left_ankle.y, right_ankle.y)
+        
+        # 地面からの相対的な高さ（メートル）を算出
+        raw_left = max(0.0, ground_y - left_ankle.y)
+        raw_right = max(0.0, ground_y - right_ankle.y)
+        
+        # 歩幅（2D平面上の距離）の計算 (x, z軸: メートル)
+        # ユーザーの「一歩進めたか」を補助的に確認するための指標
+        step_length = np.sqrt((left_ankle.x - right_ankle.x)**2 + (left_ankle.z - right_ankle.z)**2)
+        metrics['step_length'] = step_length
         
         self.feet_state['left']['history'].append(raw_left)
         self.feet_state['right']['history'].append(raw_right)
@@ -163,18 +141,19 @@ class Visualizer:
             
         # パラメータとリアルタイム指標用の半透明オーバーレイ
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (450, 150), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (0, 0), (500, 160), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
         
         font = cv2.FONT_HERSHEY_SIMPLEX
         color = (255, 255, 255)
         
         # 指標のテキスト描画
-        cv2.putText(frame, f"L Lift: {metrics.get('left_lift', 0):.3f} (Thresh: {params.height_threshold:.3f})", (10, 30), font, 0.6, color, 1)
-        cv2.putText(frame, f"R Lift: {metrics.get('right_lift', 0):.3f} (Thresh: {params.height_threshold:.3f})", (10, 80), font, 0.6, color, 1)
+        cv2.putText(frame, f"L Lift(m): {metrics.get('left_lift', 0):.3f} (Thresh: {params.height_threshold:.3f})", (10, 30), font, 0.6, color, 1)
+        cv2.putText(frame, f"R Lift(m): {metrics.get('right_lift', 0):.3f} (Thresh: {params.height_threshold:.3f})", (10, 80), font, 0.6, color, 1)
+        cv2.putText(frame, f"Step Length(m): {metrics.get('step_length', 0):.3f}", (10, 140), font, 0.6, (200, 255, 200), 1)
         
         # リアルタイムの上がり幅を横向きバーで描画
-        def draw_bar(y_pos, val, thresh, max_val=0.5):
+        def draw_bar(y_pos, val, thresh, max_val=0.3):
             bar_max_w = 300
             bar_h = 15
             px = int(min(1.0, val / max_val) * bar_max_w)
