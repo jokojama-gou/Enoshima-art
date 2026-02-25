@@ -1,14 +1,29 @@
+int waitMilliSeconds = 1800;
+
+
 void setup() {
-  // 13番ピンを出力モードに設定
   pinMode(13, OUTPUT);
+  // シリアル通信の開始（ボーレートは9600）
+  Serial.begin(9600);
 }
 
 void loop() {
-  // トランジスタをONにする（門を開く）
-  digitalWrite(13, HIGH);
-  delay(1000); // 1秒待機
+  // シリアルバッファにデータがあるか確認
+  if (Serial.available() > 0) {
+    // データを読み捨ててバッファをクリア（Enterキー等の入力を検知）
+    while(Serial.available() > 0) {
+      Serial.read();
+      delay(5); // 連続入力の取りこぼし防止
+    }
 
-  // トランジスタをOFFにする（門を閉じる）
-  digitalWrite(13, LOW);
-  delay(1000); // 1秒待機
+    // トランジスタをON
+    digitalWrite(13, HIGH);
+    delay(waitMilliSeconds);
+
+    // トランジスタをOFF
+    digitalWrite(13, LOW);
+    
+    Serial.println("Action completed電流をながしました💡⏰️.");
+    //enterキーおしたときにだけ、電流を通す。
+  }
 }
