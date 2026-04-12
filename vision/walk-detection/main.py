@@ -13,6 +13,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import time
+import socket
 from dataclasses import dataclass
 from typing import Optional, Dict
 
@@ -190,7 +191,12 @@ def main():
     parser = argparse.ArgumentParser(description="MediaPipe Pose - Walk Detection")
     parser.add_argument('--camera', type=int, default=None, help="Camera device ID. If not set, a selection menu will appear.")
     parser.add_argument('--threshold', type=float, default=0.15, help="Initial height threshold for foot lift.")
+    parser.add_argument('--udp-ip', type=str, default="127.0.0.1", help="UDP IP address to send step duration.")
+    parser.add_argument('--udp-port', type=int, default=1902, help="UDP port to send step duration.")
     args = parser.parse_args()
+
+    # UDPソケットの初期化
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     camera_id = args.camera
     if camera_id is None:
@@ -295,6 +301,13 @@ def main():
                 print(f"[Step Detected] Duration: {step_duration:.2f}s")
                 visualizer.trigger_flash(step_duration)
 
+                # UDPで期間（秒）を送信
+                try:
+                    msg = f"{step_duration:.2f}".encode('utf-8')
+                    udp_sock.sendto(msg, (args.udp_ip, args.udp_port))
+                except Exception as e:
+                    print(f"UDP Send Error: {e}")
+
             # 描画処理
             output_frame = visualizer.draw(image, results, metrics, params)
             
@@ -307,6 +320,7 @@ def main():
                 
     cap.release()
     cv2.destroyAllWindows()
+    udp_sock.close()
 
 if __name__ == '__main__':
     main()
