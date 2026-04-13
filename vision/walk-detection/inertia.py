@@ -29,7 +29,7 @@ MIN_ACTUAL_SPEED = 0.005 # v_actualが0のときの極低速（微細な揺ら�
 # ==============================================================================
 
 # UDP受信用グローバル変数
-udp_data = {"left_lift": 0, "right_lift": 0, "total_lift": 0, "step_length": 0.0}
+udp_data = {"left_lift": 0.0, "right_lift": 0.0, "total_lift": 0.0, "step_length": 0.0}
 raw_udp_str = "Waiting for UDP..."
 is_running = True
 
@@ -47,9 +47,9 @@ def udp_listener():
             raw_udp_str = data_str
             parts = data_str.split(',')
             if len(parts) >= 4:
-                udp_data["left_lift"] = int(parts[0].strip())
-                udp_data["right_lift"] = int(parts[1].strip())
-                udp_data["total_lift"] = int(parts[2].strip())
+                udp_data["left_lift"] = float(parts[0].strip())
+                udp_data["right_lift"] = float(parts[1].strip())
+                udp_data["total_lift"] = float(parts[2].strip())
                 udp_data["step_length"] = float(parts[3].strip())
         except socket.timeout:
             pass

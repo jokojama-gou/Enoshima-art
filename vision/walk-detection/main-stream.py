@@ -16,8 +16,6 @@ import time
 import socket
 from dataclasses import dataclass
 from typing import Optional, Dict
-with mp_pose.Pose(model_complexity=0) as pose: # 0:Lite, 1:Full, 2:Heavy
-    
 
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
