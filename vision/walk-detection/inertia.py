@@ -6,6 +6,9 @@ import socket
 import threading
 import pygame
 import os
+import tkinter as tk
+from tkinter import messagebox
+
 
 # ==============================================================================
 # 設定変数 (CONFIGURATION)
@@ -158,8 +161,25 @@ class VideoReaderThread:
         if self.cap.isOpened():
             self.cap.release()
 
+def ask_startup_mode():
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    ans = messagebox.askyesno(
+        "Operation Mode / 動作モードの選択",
+        "本番モード (UDP通信) で起動しますか？\n\n"
+        "[ はい ] 本番モード : UDPポート1902から歩行データを受信します\n"
+        "[ いいえ ] デバッグモード : 画面上のスライダーを使って手動で操作します",
+        parent=root
+    )
+    root.destroy()
+    return 0 if ans else 1  # 0=Auto(UDP), 1=Manual(Trackbar)
+
 def main():
     global is_running
+    
+    # --- 起動モードの確認 ---
+    initial_mode = ask_startup_mode()
     
     # 1. UDPスレッド開始
     threading.Thread(target=udp_listener, daemon=True).start()
@@ -183,18 +203,23 @@ def main():
     fps = reader.fps
 
     cv2.namedWindow("Inertia Engine UI", cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Video Output", cv2.WINDOW_NORMAL)
+    
+    # "Video Output"をフルスクリーン化(フレームなし)するための状態変数
+    is_fullscreen = False
     
     # --- Trackbars等のUI初期化 ---
     # Mode Selector: 0=Auto(UDP), 1=Manual(Trackbar)
-    cv2.createTrackbar("Mode(0:A 1:M)", "Inertia Engine UI", 0, 1, on_trackbar)
+    cv2.createTrackbar("Mode(0:A 1:M)", "Inertia Engine UI", initial_mode, 1, on_trackbar)
     # Debug Speed: 0-100 (マッピング後 0.0-5.0)
     cv2.createTrackbar("Debug Speed", "Inertia Engine UI", 0, 100, on_trackbar)
     # Mapping Factor: 0-100 (マッピング後 0.0-5.0)
-    cv2.createTrackbar("Mapping Factor", "Inertia Engine UI", 20, 100, on_trackbar)
+    cv2.createTrackbar("Mapping Factor", "Inertia Engine UI", 20, 300, on_trackbar)
     # Inertia Intensity: 0-100 (マッピング後 0.0-2.0倍率)
     cv2.createTrackbar("Inertia", "Inertia Engine UI", 50, 100, on_trackbar)
 
     v_actual = 0.0
+    v_input_smoothed = 0.0
     virtual_video_time = 0.0
     
     last_loop_time = time.perf_counter()
@@ -209,6 +234,7 @@ def main():
     print(" - UDPポート: 1902 で待機中")
     print(" - UI上で動作モード(Auto/Manual)を切り替え可能")
     print(" - [O]キーで画面上テキスト(OSD)の表示/非表示をトグル")
+    print(" - [F]キーで Video Output のフルスクリーン(余白/フレームなし)切替")
     print(" - 終了するにはESCキーを押してください")
     print("="*50 + "\n")
 
@@ -231,9 +257,14 @@ def main():
             # Auto Mode: UDPで受信した total_lift を使用
             v_input = float(udp_data["total_lift"])
 
+        # 入力値の指数平滑化（Low-pass Filter）
+        # 急な強い入力やUDPのノイズを吸収し、ゆっくりと入力が立ち上がるようにする
+        alpha_smooth = 1.0 - math.exp(-3.0 * dt)
+        v_input_smoothed += alpha_smooth * (v_input - v_input_smoothed)
+
         # --- 2. 目標速度(v_target)の算出 ---
         mapping_factor = mapping_val / 20.0  # デフォルト=1.0 (20/20.0)
-        v_target = v_input * mapping_factor
+        v_target = v_input_smoothed * mapping_factor
         
         # --- 3. 物理エンジン(Inertia Model) ---
         # スライダーから慣性の強さの倍率を取得（50が基準の1.0倍）
@@ -250,14 +281,20 @@ def main():
         v_actual += rate * (v_target - v_actual)
         
         # --- 4. 多層音響制御 (クロスフェード) ---
-        # 静止時(0)〜極低速時は静かな環境音(Low)のみ
-        vol_low = 1.0 if v_actual > 0.05 else 0.5
+        # 進行度(progress)を求め、指数関数(pow)でカーブを作ることで
+        # 動き出しは極めて微かに、速度が上がるにつれて豊かに広がるようにする
         
-        # 中速域で波の音(Mid)をフェードイン (v_actual=0.5〜1.0で0.0->1.0に)
-        vol_mid = np.clip((v_actual - 0.5) / 0.5, 0.0, 1.0)
+        # Lowレイヤー（海の気配）: 完全に無音の状態を作らず、最低0.2を維持
+        low_progress = np.clip(v_actual / 0.5, 0.0, 1.0)
+        vol_low = 0.2 + 0.8 * math.pow(low_progress, 2)
         
-        # 高速域で引き波の音(High)をフェードイン (v_actual=1.2〜2.0で0.0->1.0に)
-        vol_high = np.clip((v_actual - 1.2) / 0.8, 0.0, 1.0)
+        # Midレイヤー（波の砕ける音など）: 中速域(0.5 ~ 1.5)でフェードイン
+        mid_progress = np.clip((v_actual - 0.5) / 1.0, 0.0, 1.0)
+        vol_mid = math.pow(mid_progress, 2.5)
+        
+        # Highレイヤー（引き波の激しい音など）: 高速域(1.2 ~ 2.5)でフェードイン
+        high_progress = np.clip((v_actual - 1.2) / 1.3, 0.0, 1.0)
+        vol_high = math.pow(high_progress, 3.0)
         
         if ch_low: ch_low.set_volume(vol_low)
         if ch_mid: ch_mid.set_volume(vol_mid)
@@ -289,7 +326,7 @@ def main():
             mode_text = "AUTO(UDP)" if mode == 0 else "MANUAL(Slider)"
             draw_text(display_frame, f"Mode: {mode_text}", (30, 40), (200, 200, 255))
             draw_text(display_frame, f"UDP: {raw_udp_str}", (30, 80), (255, 200, 200))
-            draw_text(display_frame, f"v_in: {v_input:.2f} | target: {v_target:.2f} | actual: {v_actual:.3f}x", (30, 120), (0, 255, 255))
+            draw_text(display_frame, f"v_in: {v_input:.2f} | smooth: {v_input_smoothed:.2f} | actual: {v_actual:.3f}x", (30, 120), (0, 255, 255))
             draw_text(display_frame, f"Audio [Low:{vol_low:.2f} Mid:{vol_mid:.2f} High:{vol_high:.2f}]", (30, 160), (255, 200, 100))
         else:
             # OSD無効時はコピーも省き最速化
@@ -297,10 +334,14 @@ def main():
             # ターミナルへ定期的にプリント（約0.1秒間隔）
             if current_time - last_print_time > 0.1:
                 m_str = "AUTO" if mode == 0 else "MAN"
-                print(f"Mode={m_str} | in={v_input:.2f} | actual={v_actual:.3f}x | UDP={raw_udp_str: <20}", end='\r')
+                print(f"Mode={m_str} | in={v_input:.2f} | smth={v_input_smoothed:.2f} | actual={v_actual:.3f}x | UDP={raw_udp_str: <20}", end='\r')
                 last_print_time = current_time
 
+        # PC操作用のUIウィンドウ (スライダーとOSD付き)
         cv2.imshow("Inertia Engine UI", display_frame)
+        
+        # 本番用の純粋な映像ウィンドウ (OSDなし、フルスクリーン対応)
+        cv2.imshow("Video Output", current_frame)
         
         # 1ms待機しつつキー入力受付
         key = cv2.waitKey(1) & 0xFF
@@ -310,6 +351,14 @@ def main():
         elif key == ord('o') or key == ord('O'):
             show_osd = not show_osd
             print(f"\nOSD Display: {'ON' if show_osd else 'OFF'}                         ")
+        elif key == ord('f') or key == ord('F'):
+            is_fullscreen = not is_fullscreen
+            if is_fullscreen:
+                cv2.setWindowProperty("Video Output", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                print("\nVideo Output: FULLSCREEN                     ")
+            else:
+                cv2.setWindowProperty("Video Output", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+                print("\nVideo Output: WINDOWED                       ")
 
         # --- 厳密なFPS管理 (busy wait) ---
         # OpenCVのwaitKeyだけではOSのタイマー精度(最大15ms)によりブレるため、
